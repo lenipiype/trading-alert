@@ -1,0 +1,11 @@
+services:
+  signals:
+    build: .
+    user: "${SERVICE_UID:-1000}:${SERVICE_GID:-1000}"
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    init: true

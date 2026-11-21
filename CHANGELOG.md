@@ -1,0 +1,15 @@
+# Build log
+
+| Change | Why | How | Recommended follow-up |
+| --- | --- | --- | --- |
+| Added signal ingestion schema, candidate filter and classifier validation | Keep an audit trail and prevent malformed model output from triggering alarms | SQLite revision IDs, configurable aliases, and validation of allowed classification fields | Tune against 5–10 examples from the signal group |
+| Added provider clients and alarm worker | Send repeatable emergency pushes and track acknowledgement and calls | Pushover receipts and a durable SQLite alarm queue with Twilio call IDs | Run the phone checks on the owner's device |
+| Added digest, weekly review, and file-based quote support | Surface outcomes, study notes, and reviewable alarm errors | Source-bounded summarization, owner labels, and time-matched CSV quotes | Connect a quote feed and confirm total position units |
+| Connected Telegram ingestion, private controls and scheduled delivery | Run the service end to end | Telethon events and catch-up, owner-checked bot callbacks, and persisted digest progress | Test with an authorized Telegram test group |
+| Added environment template, container and backup commands | Make local and VPS runs repeatable | Explicit configuration, a single Compose service and SQLite online backup | Run a restore drill on the VPS |
+| Added the Telegram dashboard and deployment guide | Make reviewing and running the service practical | Private bot commands plus Windows, Compose and phone verification steps | Review detection results weekly |
+| Added offline acceptance tests and fixed an ambiguous queue query | Cover regressions in the four build phases | Temporary SQLite databases, fake providers and a qualified alert query column | Repeat the acceptance checks with real providers |
+| Hardened reconnects, weekly boundaries and optional backup calls | Preserve group identity across restarts and cover the complete reporting interval | Bound the database to one Telegram peer, requested Telegram catch-up, aligned review windows to the digest cutoff, and used the owner attempt time for backup escalation | Verify restart behavior and backup calls during the phone trial |
+| Added optional iPhone Clock mode and setup instructions | Let the iPhone stop each alarm while the Telegram automation stays armed | Send a standard Pushover notification with a stable per-signal title for Shortcuts, reuse the cooldown and On/Off state, and finish delivery without a receipt or call | Test with the iPhone locked and its overnight Focus enabled |
+| Tested both wake-up modes | Catch regressions in delivery, cooldown, and manual controls | Mocked the Pushover payload and exercised queue processing, Off-to-On transitions, retries, and later signals | Verify native alarm creation and dismissal on the iPhone |
+| Moved the project into the trading alert folder | Keep the project together inside Leni_projects | Moved all project files and local directories into one folder and checked the resulting file list | Open PowerShell in the new folder before running the service |
