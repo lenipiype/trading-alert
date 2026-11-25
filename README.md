@@ -1,23 +1,25 @@
 # Trading Signal Alarm and Daily Summary
 
-This service reads one Telegram signal group through your Telegram user session, sends Pushover alerts, and delivers a daily summary through your private Telegram bot. You place any trades yourself. WhatsApp input comes from a chat export you send to the bot.
+This service reads one Telegram signal group through your Telegram user session. Your private Telegram bot delivers wake-up messages and the daily summary. An iPhone Shortcut creates the Clock alarm. You place any trades yourself. WhatsApp input comes from a chat export you send to the bot.
 
 ## Alarm controls
 
-Send `/alarm` to the bot. **On** arms wake-ups for qualifying fresh signals. **Off** sends ordinary notifications and downgrades queued wake-ups. The bot shows the current setting and delivery mode, and SQLite preserves the On/Off state across restarts. A fresh database starts Off. Monitoring, history, and digests continue in either state.
+Send `/alarm` to the bot. **On** arms wake-ups for fresh new signals classified with medium or high confidence. **Off** cancels wake-ups still queued for delivery. SQLite preserves the switch across restarts, and a fresh database starts Off. Monitoring, history, and digests continue in either state.
 
-- **`ALARM_MODE=iphone_clock`** sends a single Pushover notification titled `Trading Wake-Up #<message ID>`. A Shortcut on your iPhone creates a one-time Clock alarm. Use the Clock screen's Stop control for the current alarm. Telegram stays armed for the next signal. Turning the bot Off prevents future wake-up notifications. Manage alarms already created on the iPhone in Clock. This mode uses a standard-priority push without Pushover repeats, acknowledgement, or Twilio escalation.
-- **`ALARM_MODE=pushover`** is the default. An emergency push repeats every 30 seconds for up to 10 minutes. A call to the owner is attempted after two minutes without Pushover acknowledgement, followed by an optional backup call three minutes after the first call attempt. Acknowledge in Pushover. Turning the bot Off requests cancellation of active repeats and calls, which can take several seconds.
+The bot sends each qualifying wake-up to the private chat identified by `BOT_OWNER_ID`. It starts with a project-generated header and the signal details. [Telegram Bot API](https://core.telegram.org/bots/api#sendmessage)
 
-The cooldown is five minutes per symbol and direction in both modes. Low-confidence signals and messages older than five minutes get ordinary notifications. New installs capture from the point of first connection.
+```text
+Trading Wake-Up #123
+SELL XAUUSD | Entry: market | SL: NOT GIVEN | TP: NOT GIVEN
+```
+
+The cooldown is five minutes per symbol and direction. Nonqualifying messages, updates, closures, and discussion are available in history and the digest. New installs capture from the point of first connection. Use **Stop** or **Snooze** in Clock for the current alarm. Those controls are local to the iPhone. The bot switch applies to future delivery, and a message already sent or in flight can still produce its Clock alarm.
 
 ## Configure accounts
 
 1. Copy `.env.example` to `.env`. Keep the file private and enter credentials directly there.
-2. Create a Telegram API application and set `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`. Create a separate bot with BotFather, set `BOT_TOKEN`, and start a private chat with it. Set `BOT_OWNER_ID` to your numeric Telegram user ID. The bot is for controls and reports and does not need group membership. [Telegram API credentials](https://core.telegram.org/api/obtaining_api_id) · [Telegram Bot API](https://core.telegram.org/bots/api)
+2. Create a Telegram API application and set `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`. Create a separate bot with BotFather, set `BOT_TOKEN`, and start a private chat with it. Set `BOT_OWNER_ID` to your positive numeric Telegram user ID. The bot delivers wake-ups and reports and handles the controls. Group access comes from the user session. [Telegram API credentials](https://core.telegram.org/api/obtaining_api_id) · [Telegram Bot API](https://core.telegram.org/bots/api)
 3. Set `OPENAI_API_KEY` and keep `OPENAI_MODEL=gpt-4o-mini` or select a model that supports Chat Completions JSON mode. Candidate Telegram messages, reply context, and materials for the digest are sent to the model provider. Check both groups' rules and any permission requirements before using real messages.
-4. Register a Pushover application and configure `PUSHOVER_TOKEN` and `PUSHOVER_USER`. Install Pushover on your phone and sign in to the account that owns the user key. [Pushover receipts API](https://pushover.net/api/receipts)
-5. To enable calls in `pushover` mode, configure `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM`, and `OWNER_PHONE`. Use a Twilio voice-capable number and E.164 format, including the country code. Leave `BACKUP_PHONE` blank until the backup recipient agrees. Confirm destination permissions, trial verification requirements if applicable, and pricing in Twilio before testing. [Twilio Call resource](https://www.twilio.com/docs/voice/api/call-resource)
 
 Defaults are `Europe/Vienna`, a daily digest at 18:00 local, a morning heartbeat from 09:00 local, and XAUUSD aliases `gold`, `XAU`, and `XAUUSD`. The digest window runs from the previous scheduled cutoff to the current cutoff. Exports received after cutoff go into the next digest. The bot accepts UTF-8 text exports up to 2 MB and deduplicates identical imports within each digest window. Sunday digests are followed by a weekly alarm review.
 
@@ -64,20 +66,23 @@ docker compose logs --tail=100 signals
 
 The container uses outbound connections and publishes no ports. After changing source, use `docker compose up -d --build`. For a lost Telegram login, stop the service with `docker compose stop signals`, rerun the interactive login, then bring it back up. Use a new data directory and separate bot for a different signal group or for a parallel test service.
 
-## Set up iPhone Clock mode
+## Upgrade an existing installation
 
-1. If the service is already running in Pushover mode, turn it Off in Telegram and wait for active pushes and calls to stop. Set `ALARM_MODE=iphone_clock` in your `.env`. Restart the local process or run `docker compose up -d --build` on the VPS with the updated project. Open `/alarm` and confirm the bot displays **iPhone Clock**.
-2. On an iPhone with iOS 27, create a Shortcut with a **Notification** automation trigger. Choose **Pushover** and add a **Title** filter for titles containing `Trading Wake-Up #`. Set the trigger to run without confirmation and enable **Allow Running When Locked** in the Shortcut's privacy settings. Allow immediate Pushover notifications in the Focus you use while sleeping. [Apple notification triggers](https://support.apple.com/en-by/guide/shortcuts/apd932ff833f/10.0/ios/27) · [Apple automation settings](https://support.apple.com/en-ae/guide/shortcuts/apdfbdbd7123/10.0/ios/27)
-3. Add **Current Date**, then **Adjust Date** to add one minute, then **Create Alarm** using that adjusted time. Leave Repeat empty and use the incoming notification's full title as the alarm label. To handle a delivery retry, add a check before **Create Alarm** that looks up Clock alarms and ends the Shortcut if one already has that exact label. Retries for the same notification reuse its title. Keep recent alarms in Clock while testing the duplicate check.
-4. Turn `/alarm` On and send a qualifying test signal with the phone locked, Silent Mode on, and your usual Focus enabled. Confirm exactly one Clock alarm rings. Stop it on the Clock screen and check that Telegram still says On. After the cooldown, send another test signal and confirm it rings too. Turn `/alarm` Off and send a final test signal. It should arrive as an ordinary push without scheduling a Clock alarm. [Apple Clock alarm settings](https://support.apple.com/en-us/118444)
+On the old version, turn `/alarm` Off and wait for active Pushover alerts and calls to finish. Back up SQLite. Keep your Telegram and OpenAI settings and the existing `data/` directory. The updated service no longer uses the old `ALARM_MODE`, Pushover, or Twilio settings. Install the updated files and restart the local process or run `docker compose up -d --build` on the VPS. On its first start, the new worker retires unfinished alerts from the previous version and keeps the history and alarm switch.
 
-## Verify Pushover mode
+## Set up the iPhone Shortcut
 
-1. Open the bot and send `/start`. With the alarm Off, post an example such as “Selling gold now” in your test group. Confirm you get an ordinary push and a recorded decision under `/history`.
-2. Turn the alarm On. Enable Pushover Critical Alerts if available on iOS, or allow the Pushover notification channel through Do Not Disturb on Android. Allow the Twilio caller through your phone's Focus or Do Not Disturb settings. Choose a distinctive sound and test with the phone in its actual overnight configuration.
-3. Send another qualifying test signal after the cooldown. Acknowledge the emergency notification and confirm the repeats stop and no call is placed. In another test, wait for the configured owner call, then acknowledge and confirm ringing or the connected call ends. Test **Off** separately with an active alarm. Use consenting recipients for backup-call tests.
-4. Send a study-group export without media to the bot. Confirm the bot gives a digest date and check that the next digest includes it. Test one cutoff without an export, and confirm the morning heartbeat arrives.
-5. Use an authorized test group for a one-to-two-week trial. Compare at least five to ten examples, including questions, negations, replies, closures, and edits. Use `/dashboard`, `/history [before ID]`, and `/review ID false|missed|ok` to review results. Retest the phone setup weekly.
+1. On iOS 27, add a **Notification** automation trigger in Shortcuts. Choose **Telegram** and add **Message contains** `Trading Wake-Up #`. Enable Telegram notifications and allow them through your usual Focus. Keep the private bot chat unmuted. [Apple notification triggers](https://support.apple.com/en-by/guide/shortcuts/apd932ff833f/10.0/ios/27)
+2. Send a test alert and check the title of the notification that actually arrives on your iPhone. Add a **Title** filter for the private bot's observed title before relying on the automation. The message filter alone can also match text posted in other Telegram chats. If the lock screen hides the message body, check Telegram's preview settings and confirm the test still reaches Shortcuts under your chosen lock-screen settings.
+3. Set the Shortcut to run without confirmation and allow execution when locked. From the incoming notification message, match the header using `(?m)^Trading Wake-Up #[0-9]+$`. End the Shortcut if there is no match. Use the matched header as the Clock alarm label. End the Shortcut if Clock already contains that exact label, so a retry with the same signal ID cannot schedule another alarm. [Apple automation settings](https://support.apple.com/en-ae/guide/shortcuts/apdfbdbd7123/10.0/ios/27)
+4. Add the current date, adjust it by **two minutes**, and pass that time to **Create Alarm**. Leave **Repeat** unset. Choose the alarm sound you want in Clock. [Apple Clock alarm settings](https://support.apple.com/en-us/118444)
+
+## Verify delivery and reporting
+
+1. Send `/alarm` to the private bot and confirm it shows **iPhone Clock via Telegram**. While Off, post “Selling gold now” in the test group and confirm `/history` records it without a wake-up message.
+2. Turn On and post a fresh qualifying signal with the phone locked, Silent Mode on, and your usual Focus enabled. Confirm the private bot notification schedules one Clock alarm. Stop it in Clock, check that `/alarm` still shows On, and send another test signal after the cooldown.
+3. Send a WhatsApp text export without media to the bot and check the next digest. Test one cutoff without an export and verify the morning heartbeat arrives.
+4. Use an authorized test group for a one-to-two-week trial. Compare five to ten examples, including questions, negations, replies, closures, and edits. Use `/dashboard`, `/history [before ID]`, and `/review ID false|missed|ok` to review results.
 
 ## Price comparison and exposure
 
@@ -95,6 +100,6 @@ docker compose exec signals python app.py backup /data/signals-backup.sqlite
 
 The destination must be new. Schedule timestamped backups and copy them to private storage. To restore, stop the service, archive the current database and any WAL and SHM files, install the backup as `data/signals.sqlite`, and restart. After a restore, check the alarm setting and avoid resuming any old pending alerts until their state has been reviewed. Keep the Telegram session file separate and protected.
 
-The service retries provider reads and delivery failures with backoff. A provider timeout can leave uncertainty about whether a push or digest part was accepted, so retries can occasionally duplicate delivery. Twilio call creation is attempted once per stage to avoid redialing on an ambiguous response. The service cannot cancel a call whose ID was never returned by Twilio.
+The service retries delivery failures with backoff while signals are fresh. A timeout can leave uncertainty about whether Telegram accepted a message. A retry keeps the same wake-up ID so the Shortcut can avoid creating another alarm for that signal.
 
 See [the build log](CHANGELOG.md) for implementation changes and follow-ups.

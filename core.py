@@ -75,8 +75,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE TABLE IF NOT EXISTS alerts (
     message_id INTEGER PRIMARY KEY REFERENCES messages(id), emergency INTEGER NOT NULL,
     created REAL NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
-    receipt TEXT, owner_call TEXT, backup_call TEXT,
-    started REAL, owner_at REAL, backup_at REAL,
+    started REAL,
     retry_at REAL NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -132,7 +131,16 @@ class Store:
             telegram_id, revision, sent, edited, reply_to, body, link, media,
         )
 
-    def decide(self, message, result, reason, now, cooldown, max_age, *, wake_reason="emergency queued"):
+    def prepare_telegram_wakeups(self):
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            migrated = db.execute(
+                "INSERT OR IGNORE INTO settings VALUES ('telegram_wakeups', '1')",
+            )
+            if migrated.rowcount:
+                db.execute("UPDATE alerts SET state='retired' WHERE state IN ('pending', 'active', 'stopping')")
+
+    def decide(self, message, result, reason, now, cooldown, max_age):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             previous = db.execute(
@@ -158,26 +166,31 @@ class Store:
                 reason = "duplicate revision alert suppressed"
             elif kind == "new_signal" and alerted:
                 reason = "duplicate revision alert suppressed"
-            elif kind in ("new_signal", "update", "closing"):
-                emergency = False
+            elif kind == "new_signal":
                 alarm = db.execute("SELECT value FROM settings WHERE key='alarm'").fetchone()
-                if (
-                    kind == "new_signal" and result["confidence"] != "low"
-                    and alarm and alarm["value"] == "on" and now - message["sent"] <= max_age
-                ):
+                if result["confidence"] not in ("medium", "high"):
+                    reason = "wake-up skipped: low confidence"
+                elif not alarm or alarm["value"] != "on":
+                    reason = "wake-up skipped: alarm off"
+                elif not 0 <= now - message["sent"] <= max_age:
+                    reason = "wake-up skipped: outside freshness window"
+                else:
                     recent = db.execute(
                         """SELECT 1 FROM alerts JOIN messages ON messages.id=alerts.message_id
                            WHERE emergency=1 AND created>?
+                           AND state IN ('pending', 'sent')
                            AND json_extract(classification,'$.symbol')=?
                            AND json_extract(classification,'$.direction')=? LIMIT 1""",
                         (now - cooldown, result["symbol"], result["direction"]),
                     ).fetchone()
-                    emergency = not recent
-                reason = wake_reason if emergency else "normal push queued"
-                db.execute(
-                    "INSERT INTO alerts (message_id, emergency, created) VALUES (?, ?, ?)",
-                    (message["id"], int(emergency), now),
-                )
+                    if recent:
+                        reason = "wake-up skipped: cooldown"
+                    else:
+                        reason = "Telegram wake-up queued"
+                        db.execute(
+                            "INSERT INTO alerts (message_id, emergency, created) VALUES (?, 1, ?)",
+                            (message["id"], now),
+                        )
             db.execute(
                 "UPDATE messages SET classification=?, decision=? WHERE id=?",
                 (json.dumps(result) if result else None, reason, message["id"]),

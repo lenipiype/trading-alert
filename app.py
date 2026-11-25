@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import errno
 import hashlib
 import json
 import logging
@@ -7,14 +8,41 @@ import os
 import re
 import sys
 import time
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from alarms import IPHONE_CLOCK, AlarmWorker
+from alarms import AlarmWorker
 from core import PROMPT, Store, candidates, validate
 from history import chunks, digest, labeled, weekly
-from providers import Providers
+from providers import APIError, Providers, send_owner
+
+
+class SessionInUseError(Exception):
+    pass
+
+
+@contextmanager
+def service_lock(data):
+    with (data / "service.lock").open("a+b") as handle:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno not in (errno.EACCES, errno.EAGAIN):
+                raise
+            raise SessionInUseError(
+                "Another process is using this data folder. Stop it before starting the bot or logging in."
+            ) from None
+        yield
 
 
 def configuration():
@@ -24,9 +52,6 @@ def configuration():
     config = dict(os.environ)
     config.setdefault("DATA_DIR", "data")
     config.setdefault("OPENAI_MODEL", "gpt-4o-mini")
-    config.setdefault("ALARM_MODE", "pushover")
-    if config["ALARM_MODE"] not in ("pushover", IPHONE_CLOCK):
-        raise ValueError("ALARM_MODE must be pushover or iphone_clock")
     config["ZONE"] = ZoneInfo(config.get("TIMEZONE", "Europe/Vienna"))
     config["DIGEST_TIME"] = datetime.strptime(config.get("DIGEST_TIME", "18:00"), "%H:%M").time()
     config["ALIASES"] = json.loads(config.get("ALIASES_JSON", '{"XAUUSD":["gold","XAU","XAUUSD"]}'))
@@ -91,12 +116,8 @@ def classify_pending(store, providers, config):
                 "reply_to": row["reply_to"], "reply_context": parents,
             })
             result = validate(result, row["body"], row["reply_to"], config["ALIASES"], fresh)
-            wake_reason = (
-                "iPhone Clock wake-up queued" if config.get("ALARM_MODE") == IPHONE_CLOCK else "emergency queued"
-            )
             store.decide(
                 row, result, result["type"], time.time(), config["COOLDOWN"], config["MAX_WAKE_AGE"],
-                wake_reason=wake_reason,
             )
         except Exception as error:
             logging.warning("Classification %s failed (%s)", row["id"], type(error).__name__)
@@ -111,13 +132,12 @@ def classify_pending(store, providers, config):
 
 def send(providers, config, text, **options):
     for part in chunks(text, 3500):
-        providers.bot("sendMessage", chat_id=int(config["BOT_OWNER_ID"]), text=part, **options)
+        send_owner(providers, config, part, **options)
 
 
-def alarm_menu(store, config):
+def alarm_menu(store):
     on = store.get("alarm") == "on"
-    mode = "iPhone Clock" if config.get("ALARM_MODE") == IPHONE_CLOCK else "Pushover"
-    return f"Alarm is {'ON' if on else 'OFF'} · {mode}.", {
+    return f"Alarm is {'ON' if on else 'OFF'} · iPhone Clock via Telegram.", {
         "inline_keyboard": [[
             {"text": "Turn alarm off" if on else "Turn alarm on", "callback_data": "off" if on else "on"}
         ]]
@@ -128,8 +148,7 @@ def set_alarm(store, mode):
     with store.connect() as db:
         db.execute("INSERT OR REPLACE INTO settings VALUES ('alarm',?)", (mode,))
         if mode == "off":
-            db.execute("UPDATE alerts SET emergency=0 WHERE state='pending'")
-            db.execute("UPDATE alerts SET state='stopping',retry_at=0 WHERE state='active'")
+            db.execute("UPDATE alerts SET state='canceled' WHERE state='pending'")
 
 
 def handle_update(store, providers, config, update):
@@ -144,13 +163,13 @@ def handle_update(store, providers, config, update):
         mode = callback.get("data")
         if mode in ("on", "off"):
             set_alarm(store, mode)
-            text, keyboard = alarm_menu(store, config)
+            text, keyboard = alarm_menu(store)
             providers.bot("answerCallbackQuery", callback_query_id=callback["id"], text=text)
             send(providers, config, text, reply_markup=keyboard)
         return
     text = message.get("text", "").strip()
     if text in ("/start", "/alarm"):
-        status, keyboard = alarm_menu(store, config)
+        status, keyboard = alarm_menu(store)
         send(providers, config, status + "\n/dashboard · /history [before ID] · /review ID false|missed|ok\nSend a WhatsApp .txt export here.", reply_markup=keyboard)
     elif text == "/dashboard":
         stats = store.rows(
@@ -160,7 +179,7 @@ def handle_update(store, providers, config, update):
                count(CASE WHEN review='missed' THEN 1 END) AS missed
                FROM messages"""
         )[0]
-        status, keyboard = alarm_menu(store, config)
+        status, keyboard = alarm_menu(store)
         send(
             providers, config,
             f"{status}\nCaptured revisions: {stats['captured']}\n"
@@ -260,7 +279,8 @@ async def loop(job, interval):
         try:
             await asyncio.to_thread(job)
         except Exception as error:
-            logging.warning("%s failed (%s)", job.__name__, type(error).__name__)
+            detail = str(error) if isinstance(error, APIError) else type(error).__name__
+            logging.warning("%s failed (%s)", job.__name__, detail)
             await asyncio.sleep(max(5, interval))
         else:
             await asyncio.sleep(interval)
@@ -325,6 +345,7 @@ async def telegram(config, store=None, providers=None, login=False):
             store.set(cursor_key, latest[0].id if latest else 0)
         else:
             await client.catch_up()
+        logging.info("Telegram signal listener is ready. Send /alarm to the private bot.")
         while True:
             if not client.is_connected():
                 raise ConnectionError("Telegram disconnected")
@@ -338,7 +359,9 @@ async def telegram(config, store=None, providers=None, login=False):
             await asyncio.sleep(30)
     except (errors.UnauthorizedError, errors.AuthKeyError):
         if not store.get("session_warning"):
-            await asyncio.to_thread(providers.push, "Telegram login lost. Run the service login command again.", 1)
+            await asyncio.to_thread(
+                send_owner, providers, config, "Telegram login lost. Run the service login command again.",
+            )
             store.set("session_warning", "sent")
         raise
     finally:
@@ -346,6 +369,7 @@ async def telegram(config, store=None, providers=None, login=False):
 
 
 async def serve(config, store):
+    store.prepare_telegram_wakeups()
     providers = Providers(config)
     worker = AlarmWorker(store, providers, config)
     now = datetime.now(config["ZONE"])
@@ -383,15 +407,15 @@ def main():
         data.mkdir(parents=True, exist_ok=True)
         if args.command == "login":
             require(config, ["TELEGRAM_API_ID", "TELEGRAM_API_HASH"])
-            asyncio.run(telegram(config, login=True))
+            with service_lock(data):
+                asyncio.run(telegram(config, login=True))
             return
-        store = Store(data / "signals.sqlite")
         if args.command == "backup":
             import sqlite3
-            from contextlib import closing
 
             if not args.destination:
                 parser.error("backup requires a destination file")
+            store = Store(data / "signals.sqlite")
             destination = Path(args.destination)
             with destination.open("xb"):
                 pass
@@ -400,18 +424,22 @@ def main():
             return
         require(config, [
             "TELEGRAM_API_ID", "TELEGRAM_API_HASH", "TELEGRAM_GROUP", "BOT_TOKEN",
-            "BOT_OWNER_ID", "OPENAI_API_KEY", "PUSHOVER_TOKEN", "PUSHOVER_USER",
+            "BOT_OWNER_ID", "OPENAI_API_KEY",
         ])
-        if config["ALARM_MODE"] == "pushover" and (config.get("OWNER_PHONE") or config.get("BACKUP_PHONE")):
-            require(config, ["OWNER_PHONE", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM"])
-        asyncio.run(serve(config, store))
+        if not re.fullmatch(r"[1-9][0-9]{0,15}", config["BOT_OWNER_ID"]):
+            raise ValueError("BOT_OWNER_ID must be a positive Telegram user ID")
+        with service_lock(data):
+            asyncio.run(serve(config, Store(data / "signals.sqlite")))
     except KeyboardInterrupt:
         pass
+    except SessionInUseError as error:
+        logging.error("%s", error)
+        sys.exit(1)
     except ExceptionGroup as error:
         logging.error("Service stopped (%s)", ", ".join(type(item).__name__ for item in error.exceptions))
         sys.exit(1)
     except ValueError as error:
-        if str(error).startswith(("Missing configuration: ", "ALARM_MODE must be ")):
+        if str(error).startswith(("Missing configuration: ", "BOT_OWNER_ID must be ")):
             logging.error("%s", error)
         else:
             logging.error("Startup or command failed (invalid configuration)")

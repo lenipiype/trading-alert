@@ -13,3 +13,15 @@
 | Added optional iPhone Clock mode and setup instructions | Let the iPhone stop each alarm while the Telegram automation stays armed | Send a standard Pushover notification with a stable per-signal title for Shortcuts, reuse the cooldown and On/Off state, and finish delivery without a receipt or call | Test with the iPhone locked and its overnight Focus enabled |
 | Tested both wake-up modes | Catch regressions in delivery, cooldown, and manual controls | Mocked the Pushover payload and exercised queue processing, Off-to-On transitions, retries, and later signals | Verify native alarm creation and dismissal on the iPhone |
 | Moved the project into the trading alert folder | Keep the project together inside Leni_projects | Moved all project files and local directories into one folder and checked the resulting file list | Open PowerShell in the new folder before running the service |
+
+## Telegram wake-up delivery
+
+- Replaced Pushover and Twilio delivery with a private Telegram bot message so the same app carries the signal feed and the iPhone trigger. The bot sends only to the configured owner ID and adds a fixed header using the SQLite message ID.
+- Kept the freshness check, confidence threshold, per-symbol and direction cooldown, and revision deduplication. Off cancels queued wake-ups. Nonqualifying messages, updates, closures, and discussion remain available for review and reporting. The service removes the reserved trigger phrase from quoted bot output while keeping stored source text intact.
+- Retired unfinished alerts from the previous delivery path on first startup to avoid replaying them over Telegram. Existing history and the saved alarm switch carry forward.
+- Updated the environment template and deployment guide, and verified routing, retries, switching, and migration in offline tests. Confirm the bot's notification title and test the two-minute Clock alarm with the iPhone locked and the usual Focus enabled.
+
+## Local startup and reports
+
+- Added a lock for the Telegram data directory so a second service or interactive login exits with a clear error before opening the same session. The listener also logs when it is ready, and Bot API warnings identify the method and HTTP status without logging credentials.
+- Fixed daily digest generation when the configured model returns a structured `summary`. The digest now renders those sections as text and continues to include signal history. After upgrading, start one instance and use `/alarm` to verify bot polling.

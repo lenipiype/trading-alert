@@ -1,5 +1,5 @@
-import base64
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -9,13 +9,21 @@ class APIError(Exception):
     """A provider error with no credentials or message bodies in its text."""
 
 
-def request(url, *, data=None, form=False, headers=None, timeout=20, raw=False):
+WAKE_PREFIX = "Trading Wake-Up #"
+
+
+def send_owner(providers, config, text, *, wake_id=None, **options):
+    text = re.sub(re.escape(WAKE_PREFIX), "[wake-up] #", text, flags=re.IGNORECASE)
+    if wake_id is not None:
+        text = f"{WAKE_PREFIX}{wake_id}\n{text}"
+    return providers.bot("sendMessage", chat_id=int(config["BOT_OWNER_ID"]), text=text, **options)
+
+
+def request(url, *, data=None, headers=None, timeout=20, raw=False):
     headers = dict(headers or {})
     if data is not None:
-        headers["Content-Type"] = (
-            "application/x-www-form-urlencoded" if form else "application/json"
-        )
-        data = (urllib.parse.urlencode(data) if form else json.dumps(data)).encode()
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(data).encode()
     try:
         with urllib.request.urlopen(
             urllib.request.Request(url, data, headers), timeout=timeout,
@@ -49,36 +57,14 @@ class Providers:
         )
         return json.loads(data["choices"][0]["message"]["content"])
 
-    def push(self, message, priority=0, *, title=None):
-        data = {
-            "token": self.config["PUSHOVER_TOKEN"], "user": self.config["PUSHOVER_USER"],
-            "message": message, "priority": priority,
-        }
-        if title is not None:
-            data["title"] = title
-        if priority == 2:
-            data.update(retry=30, expire=600)
-        result = self.pushover("messages.json", data)
-        return result["receipt"] if priority == 2 else result.get("request")
-
-    def pushover(self, path, data=None):
-        result = request("https://api.pushover.net/1/" + path, data=data, form=True)
-        if result.get("status") != 1:
-            raise APIError("Pushover rejected request")
-        return result
-
-    def receipt(self, code):
-        token = urllib.parse.urlencode({"token": self.config["PUSHOVER_TOKEN"]})
-        return self.pushover(f"receipts/{code}.json?{token}")
-
-    def cancel_push(self, code):
-        self.pushover(f"receipts/{code}/cancel.json", {"token": self.config["PUSHOVER_TOKEN"]})
-
     def bot(self, method, **data):
-        result = request(
-            f"https://api.telegram.org/bot{self.config['BOT_TOKEN']}/{method}",
-            data=data, timeout=30,
-        )
+        try:
+            result = request(
+                f"https://api.telegram.org/bot{self.config['BOT_TOKEN']}/{method}",
+                data=data, timeout=30,
+            )
+        except APIError as error:
+            raise APIError(f"Telegram {method}: {error}") from None
         if not result.get("ok"):
             raise APIError("Telegram rejected request")
         return result["result"]
@@ -89,21 +75,3 @@ class Providers:
         url = f"https://api.telegram.org/file/bot{self.config['BOT_TOKEN']}/{path}"
         return request(url, raw=True).decode("utf-8-sig")
 
-    def twilio(self, suffix="", data=None):
-        sid = self.config["TWILIO_ACCOUNT_SID"]
-        auth = base64.b64encode(f"{sid}:{self.config['TWILIO_AUTH_TOKEN']}".encode()).decode()
-        return request(
-            f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Calls{suffix}.json",
-            headers={"Authorization": "Basic " + auth}, data=data, form=True,
-        )
-
-    def call(self, target):
-        return self.twilio(data={
-            "To": target, "From": self.config["TWILIO_FROM"], "Timeout": 25,
-            "Twiml": "<Response><Say>Trading signal alert. Check your Telegram group and acknowledge the alarm.</Say></Response>",
-        })["sid"]
-
-    def stop_call(self, sid):
-        status = self.twilio("/" + sid)["status"]
-        if status in ("queued", "ringing", "in-progress"):
-            self.twilio("/" + sid, {"Status": "completed" if status == "in-progress" else "canceled"})
